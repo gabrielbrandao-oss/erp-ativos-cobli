@@ -26,7 +26,7 @@ def buscar_planilhas(acao):
     except: return []
 
 # ==========================================
-# CARREGAMENTO DE DADOS BLINDADO
+# CARREGAMENTO DE DADOS
 # ==========================================
 st.title("🏢 Gestão de Ativos - Cobli")
 
@@ -42,7 +42,7 @@ else:
     if not nomes: nomes = ["(Aguardando desbloqueio do Slack...)"]
 
 # ==========================================
-# DASHBOARD LATERAL E CONTAGEM
+# DASHBOARD LATERAL
 # ==========================================
 ativos_colab = []
 em_uso = {"Notebook": 0, "Monitor": 0, "Celular": 0, "Headset": 0, "Teclado/Mouse": 0}
@@ -62,7 +62,7 @@ with st.sidebar:
         eqp = str(linha.get("Equipamento", "")).strip()
         cobli = str(linha.get("Cobli") or linha.get("Cobli_Novo") or "").strip()
         
-        if colab and "DEVOLVIDO" not in colab.upper() and eqp:
+        if colab and "DEVOLVIDO" not in colab.upper() and "EXTRAVIADO" not in colab.upper() and eqp:
             if eqp not in em_uso: em_uso[eqp] = 0
             em_uso[eqp] += 1
             
@@ -72,9 +72,7 @@ with st.sidebar:
     for linha in storage:
         eqp = str(linha.get("Equipamento", "")).strip()
         cond = str(linha.get("Condicao", "")).strip().upper()
-        
-        if cond in ["DEFEITO", "AVARIADO"]:
-            danificados += 1
+        if cond in ["DEFEITO", "AVARIADO"]: danificados += 1
         elif eqp:
             if eqp not in estoque: estoque[eqp] = 0
             estoque[eqp] += 1
@@ -87,13 +85,13 @@ with st.sidebar:
     st.metric("⚠️ Danificados", danificados)
 
 # ==========================================
-# CORPO PRINCIPAL (SISTEMA DE ABAS)
+# SISTEMA DE ABAS
 # ==========================================
-tab_mov, tab_lista = st.tabs(["🚀 Movimentação de Ativos", "📋 Lista Geral de Colaboradores"])
+tab_mov, tab_lista = st.tabs(["🚀 Movimentação", "📋 Lista Geral"])
 
-# ---------------- ABA 1: MOVIMENTAÇÃO ----------------
 with tab_mov:
-    fluxo = st.radio("Operação:", ["Onboarding", "Troca", "Emprestimo", "Devolvido", "Offboarding"], horizontal=True)
+    # ➕ Adicionado "Extravio" aqui
+    fluxo = st.radio("Operação:", ["Onboarding", "Troca", "Emprestimo", "Devolvido", "Offboarding", "Extravio"], horizontal=True)
     st.markdown("---")
 
     if fluxo == "Offboarding":
@@ -107,7 +105,8 @@ with tab_mov:
         eqp_sel = st.selectbox("Equipamento:", lista_eqp)
 
     cobli_sug = ""
-    if fluxo in ["Troca", "Devolvido"]:
+    # ➕ Busca automática para Extravio
+    if fluxo in ["Troca", "Devolvido", "Extravio"]:
         for a in ativos_colab:
             if a["eqp"].upper() == eqp_sel.upper():
                 cobli_sug = a["cobli"]
@@ -129,6 +128,9 @@ with tab_mov:
             c_ant = ca.text_input("Cobli Antigo (Automático):", value=cobli_sug)
             c_nov = cb.text_input("Cobli Novo:")
             cond = st.selectbox("Condição do Item Antigo:", ["Perfeito", "Defeito", "Avariado"])
+        elif fluxo == "Extravio":
+            c_ant = st.text_input("Cobli Extraviado (Automático):", value=cobli_sug)
+            cond = st.selectbox("Motivo:", ["Roubo", "Perda", "Dano Total"])
         
         obs = st.text_area("Observações:")
         
@@ -137,38 +139,31 @@ with tab_mov:
             slack_id = user["id"] if user else ""
             data_str = datetime.now().strftime("%d/%m/%Y %H:%M")
             
-            with st.spinner("Enviando para o n8n..."):
+            with st.spinner("Registrando..."):
                 if fluxo == "Offboarding":
-                    if not eqps_finais: st.error("Nenhum item selecionado.")
-                    else:
-                        for item in eqps_finais:
-                            partes = item.split(" | ")
-                            requests.post(URL_N8N, json={"action": "app-post", "colaborador": colab_sel, "slack_id": slack_id, "equipamento": partes[0].strip(), "acao": "Offboarding", "cobli_antigo": partes[1].strip() if len(partes)>1 else "", "cobli_novo": "", "prazo": "Definitivo", "condicao": cond, "observacao": obs, "data": data_str})
-                        st.success("✅ Offboarding Processado!")
+                    for item in eqps_finais:
+                        partes = item.split(" | ")
+                        requests.post(URL_N8N, json={"action": "app-post", "colaborador": colab_sel, "slack_id": slack_id, "equipamento": partes[0].strip(), "acao": "Offboarding", "cobli_antigo": partes[1].strip() if len(partes)>1 else "", "cobli_novo": "", "prazo": "Definitivo", "condicao": cond, "observacao": obs, "data": data_str})
+                    st.success("✅ Offboarding Processado!")
                 else:
                     p_final = prazo if fluxo == "Emprestimo" else "Definitivo"
                     res = requests.post(URL_N8N, json={"action": "app-post", "colaborador": colab_sel, "slack_id": slack_id, "equipamento": eqp_sel, "acao": fluxo, "cobli_antigo": c_ant, "cobli_novo": c_nov, "prazo": p_final, "condicao": cond, "observacao": obs, "data": data_str})
-                    if res.status_code == 200: st.success("✅ Protocolo Registrado!")
+                    if res.status_code == 200: st.success(f"✅ {fluxo} Registrado!")
                     else: st.error("❌ Falha no envio.")
+            st.cache_data.clear()
 
-# ---------------- ABA 2: LISTA GERAL ----------------
 with tab_lista:
-    st.markdown("### 📋 Visão Geral de Equipamentos por Colaborador")
-    
+    st.markdown("### 📋 Visão Geral por Colaborador")
     pessoas_eqp = {}
     for linha in vigentes:
         colab = str(linha.get("Colaborador", "")).strip()
         eqp = str(linha.get("Equipamento", "")).strip()
         cobli = str(linha.get("Cobli") or linha.get("Cobli_Novo") or "").strip()
-        
-        if colab and "DEVOLVIDO" not in colab.upper() and eqp:
+        if colab and "DEVOLVIDO" not in colab.upper() and "EXTRAVIADO" not in colab.upper() and eqp:
             if colab not in pessoas_eqp: pessoas_eqp[colab] = []
             pessoas_eqp[colab].append(f"**{eqp}** ({cobli})")
-            
-    if not pessoas_eqp:
-        st.info("Nenhum equipamento em posse no momento.")
+    if not pessoas_eqp: st.info("Nenhum item em posse.")
     else:
         for pessoa in sorted(pessoas_eqp.keys()):
             with st.expander(f"👤 {pessoa} - {len(pessoas_eqp[pessoa])} item(ns)"):
-                for item in pessoas_eqp[pessoa]:
-                    st.write(f"- {item}")
+                for item in pessoas_eqp[pessoa]: st.write(f"- {item}")
