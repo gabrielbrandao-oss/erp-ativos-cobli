@@ -87,7 +87,7 @@ def processar_offboarding(eqps_finais: List[str], colab_sel: str, slack_id: str,
 # CONTROLADOR / UI
 # ==========================================
 def main():
-    st.title("🏢 Gestão de Ativos - Cobli")
+    st.title("🏢 Periféricos - Cobli")
 
     vigentes = buscar_planilhas("buscar-vigentes")
     storage = buscar_planilhas("buscar-storage")
