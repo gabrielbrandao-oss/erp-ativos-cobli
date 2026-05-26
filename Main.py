@@ -10,7 +10,7 @@ from urllib3.util.retry import Retry
 # ==========================================
 # CONFIGURAÇÕES E SEGURANÇA
 # ==========================================
-st.set_page_config(page_title="ERP Ativos Cobli", layout="wide")
+st.set_page_config(page_title="Periféricos Cobli", layout="wide")
 
 # Fallback seguro para variáveis de ambiente/secrets (Evita hardcode de URLs e Tokens)
 WEBHOOK_URL = st.secrets.get("N8N_WEBHOOK_URL", "https://n8n.efop.cobli.co/webhook/gestao-ativos")
