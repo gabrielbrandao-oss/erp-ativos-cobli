@@ -34,7 +34,8 @@ def buscar_slack() -> List[Dict[str, Any]]:
         return []
 
 @st.cache_data(ttl=30, show_spinner=False)
-def buscar_planilhas(acao: str) -> List[Dict[str, Any]]:
+def buscar_planilhas(acao: str, _bust: int = 0) -> List[Dict[str, Any]]:
+    """_bust é ignorado pelo cache mas força nova requisição quando muda."""
     try:
         res = session.get(WEBHOOK_URL, params={"action": acao}, timeout=10)
         res.raise_for_status()
@@ -42,6 +43,12 @@ def buscar_planilhas(acao: str) -> List[Dict[str, Any]]:
     except requests.exceptions.RequestException:
         st.error(f"Falha ao buscar dados da base de ativos: {acao}.")
         return []
+
+def bust_e_rerun():
+    """Invalida o cache e força rerun com novo bust counter."""
+    st.session_state["cache_bust"] = st.session_state.get("cache_bust", 0) + 1
+    buscar_planilhas.clear()
+    st.rerun()
 
 def enviar_movimentacao(payload: Dict[str, Any]) -> bool:
     try:
@@ -179,8 +186,9 @@ def processar_offboarding(eqps_finais: List[str], colab_sel: str, slack_id: str,
 def main():
     st.title("🏢 Periféricos - Cobli")
 
-    vigentes = buscar_planilhas("buscar-vigentes")
-    storage = buscar_planilhas("buscar-storage")
+    bust = st.session_state.get("cache_bust", 0)
+    vigentes = buscar_planilhas("buscar-vigentes", _bust=bust)
+    storage  = buscar_planilhas("buscar-storage",  _bust=bust)
     dados_slack = buscar_slack()
 
     if dados_slack:
@@ -400,105 +408,111 @@ def main():
     # ABA: EMPRÉSTIMOS
     # ==========================================
     with tab_empr:
-        st.markdown("### ⏱ Empréstimos Ativos")
 
         if not emprestimos_ativos:
             st.info("Nenhum equipamento emprestado no momento.")
         else:
-            # Métricas de topo
+            vence_hoje = sum(1 for e in emprestimos_ativos if status_emprestimo(e["prazo"])[0] == "🟡")
+
+            # Métricas visuais
             col1, col2, col3 = st.columns(3)
             col1.metric("Total emprestados", total_emprestados)
-            col2.metric("🔴 Em atraso", total_atrasados)
-            vence_hoje = sum(1 for e in emprestimos_ativos if status_emprestimo(e["prazo"])[0] == "🟡")
-            col3.metric("🟡 Atenção (≤3 dias)", vence_hoje)
+            col2.metric("🔴 Em atraso",       total_atrasados)
+            col3.metric("🟡 Atenção (≤3d)",   vence_hoje)
 
             st.markdown("---")
 
             # Filtros
-            col_f1, col_f2 = st.columns([2, 1])
-            busca_colab = col_f1.text_input("🔍 Buscar colaborador:", placeholder="Digite o nome...")
-            filtro_status = col_f2.selectbox("Status:", ["Todos", "Atrasado", "Vence hoje/3d", "Em dia"])
+            col_f1, col_f2 = st.columns([3, 1])
+            busca_colab   = col_f1.text_input("🔍 Buscar colaborador:", placeholder="Digite o nome...")
+            filtro_status = col_f2.selectbox("Status:", ["Todos", "🔴 Atrasado", "🟡 Atenção", "🟢 Em dia"])
 
-            # Aplicar filtros
+            # Aplicar filtros e ordenar
             lista_filtrada = emprestimos_ativos.copy()
-
             if busca_colab:
-                lista_filtrada = [
-                    e for e in lista_filtrada
-                    if busca_colab.lower() in e["colaborador"].lower()
-                ]
-
+                lista_filtrada = [e for e in lista_filtrada if busca_colab.lower() in e["colaborador"].lower()]
             if filtro_status != "Todos":
-                def filtrar_por_status(e):
-                    emoji, _ = status_emprestimo(e["prazo"])
-                    if filtro_status == "Atrasado":
-                        return emoji == "🔴"
-                    elif filtro_status == "Vence hoje/3d":
-                        return emoji == "🟡"
-                    elif filtro_status == "Em dia":
-                        return emoji == "🟢"
-                    return True
-                lista_filtrada = [e for e in lista_filtrada if filtrar_por_status(e)]
+                mapa = {"🔴 Atrasado": "🔴", "🟡 Atenção": "🟡", "🟢 Em dia": "🟢"}
+                alvo = mapa[filtro_status]
+                lista_filtrada = [e for e in lista_filtrada if status_emprestimo(e["prazo"])[0] == alvo]
+            lista_filtrada.sort(key=lambda e: {"🔴": 0, "🟡": 1, "🟢": 2, "⚪": 3}.get(status_emprestimo(e["prazo"])[0], 9))
 
             if not lista_filtrada:
                 st.warning("Nenhum empréstimo encontrado com os filtros aplicados.")
             else:
-                # Ordenar: atrasados primeiro
-                def sort_key(e):
-                    emoji, _ = status_emprestimo(e["prazo"])
-                    ordem = {"🔴": 0, "🟡": 1, "🟢": 2, "⚪": 3}
-                    return ordem.get(emoji, 9)
+                st.caption(f"{len(lista_filtrada)} registro(s) exibido(s).")
 
-                lista_filtrada.sort(key=sort_key)
+                # CSS para os cards
+                st.markdown("""
+                <style>
+                .emp-card {
+                    background: var(--background-color);
+                    border: 1px solid rgba(128,128,128,0.2);
+                    border-radius: 10px;
+                    padding: 14px 18px;
+                    margin-bottom: 10px;
+                }
+                .emp-card-red   { border-left: 4px solid #E53935; }
+                .emp-card-yellow{ border-left: 4px solid #F9A825; }
+                .emp-card-green { border-left: 4px solid #43A047; }
+                .emp-nome  { font-weight: 600; font-size: 15px; margin: 0; }
+                .emp-detalhe { font-size: 13px; color: #888; margin: 2px 0 0; }
+                .emp-status-red    { color: #E53935; font-weight: 600; font-size: 13px; }
+                .emp-status-yellow { color: #F9A825; font-weight: 600; font-size: 13px; }
+                .emp-status-green  { color: #43A047; font-weight: 600; font-size: 13px; }
+                </style>
+                """, unsafe_allow_html=True)
 
-                # Cabeçalho da tabela
-                h1, h2, h3, h4, h5 = st.columns([3, 2, 2, 2, 2])
-                h1.markdown("**Colaborador**")
-                h2.markdown("**Equipamento**")
-                h3.markdown("**Cobli**")
-                h4.markdown("**Status / Retorno**")
-                h5.markdown("**Ação**")
-                st.markdown("---")
+                cor_borda  = {"🔴": "red",    "🟡": "yellow", "🟢": "green",  "⚪": "green"}
+                cor_status = {"🔴": "red",    "🟡": "yellow", "🟢": "green",  "⚪": "green"}
+                prazo_dt_fmt = lambda p: normalizar_prazo(p).strftime("%d/%m/%Y") if normalizar_prazo(p) else "—"
 
                 for idx, emp in enumerate(lista_filtrada):
                     emoji, label = status_emprestimo(emp["prazo"])
-                    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
-                    c1.write(emp["colaborador"])
-                    c2.write(emp["equipamento"])
-                    c3.write(emp["cobli"] if emp["cobli"] else "—")
-                    c4.write(f"{emoji} {label}")
+                    borda  = cor_borda.get(emoji, "green")
+                    scor   = cor_status.get(emoji, "green")
 
-                    # Botão de devolução inline
-                    if c5.button("↩ Devolver", key=f"dev_{idx}", type="secondary"):
-                        st.session_state[f"confirmar_dev_{idx}"] = True
+                    col_card, col_btn = st.columns([5, 1])
+                    with col_card:
+                        st.markdown(f"""
+                        <div class="emp-card emp-card-{borda}">
+                            <p class="emp-nome">👤 {emp['colaborador']}</p>
+                            <p class="emp-detalhe">📦 {emp['equipamento']} &nbsp;|&nbsp; 🔖 {emp['cobli'] or '—'} &nbsp;|&nbsp; 📅 Retorno: {prazo_dt_fmt(emp['prazo'])}</p>
+                            <p class="emp-status-{scor}">{emoji} {label}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
 
-                    # Painel de confirmação + condição logo abaixo da linha
+                    with col_btn:
+                        # Alinha verticalmente o botão no centro do card (≈ 70px de altura)
+                        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+                        if st.button("↩ Devolver", key=f"dev_{idx}", type="secondary", use_container_width=True):
+                            st.session_state[f"confirmar_dev_{idx}"] = True
+
+                    # Painel de confirmação expansível abaixo do card
                     if st.session_state.get(f"confirmar_dev_{idx}"):
                         with st.container():
                             st.markdown(
-                                f"> Confirmar devolução de **{emp['equipamento']}** "
-                                f"({emp['cobli']}) de **{emp['colaborador']}**?"
+                                f"**Confirmar devolução:** {emp['equipamento']} ({emp['cobli']}) "
+                                f"de **{emp['colaborador']}**"
                             )
                             col_cond, col_ok, col_cancel = st.columns([2, 1, 1])
                             cond_dev = col_cond.selectbox(
-                                "Condição:", ["Perfeito", "Defeito", "Avariado"],
+                                "Condição do item:", ["Perfeito", "Defeito", "Avariado"],
                                 key=f"cond_{idx}"
                             )
-                            if col_ok.button("✅ Confirmar", key=f"ok_{idx}", type="primary"):
-                                # Match flexível: exato → case-insensitive → primeiro nome
+                            confirmar = col_ok.button("✅ Confirmar", key=f"ok_{idx}", type="primary", use_container_width=True)
+                            cancelar  = col_cancel.button("✖ Cancelar", key=f"cancel_{idx}", use_container_width=True)
+
+                            if confirmar:
                                 user = None
                                 if dados_slack:
                                     nome_busca = emp["colaborador"].strip().lower()
-                                    # 1. exato
                                     user = next((c for c in dados_slack if str(c.get("nome","")).strip().lower() == nome_busca), None)
-                                    # 2. primeiro nome
                                     if not user:
                                         primeiro = nome_busca.split()[0]
                                         user = next((c for c in dados_slack if str(c.get("nome","")).strip().lower().startswith(primeiro)), None)
                                 slack_id = user.get("id", "") if user else ""
                                 data_str = datetime.now().strftime("%d/%m/%Y %H:%M")
-                                # Debug: mostra o que foi encontrado (remover após confirmar)
-                                st.caption(f"🔍 Debug Slack — buscando: '{emp['colaborador']}' | encontrado: {user.get('nome') if user else 'NENHUM'} | slack_id: '{slack_id}' | total no diretório: {len(dados_slack) if dados_slack else 0}")
 
                                 payload_dev = {
                                     "action": "app-post",
@@ -521,34 +535,23 @@ def main():
                                         slack_id, emp["colaborador"],
                                         emp["equipamento"], emp["cobli"]
                                     )
-                                    del st.session_state[f"confirmar_dev_{idx}"]
-                                    buscar_planilhas.clear()
-
+                                    # Limpa estado e força rerun com bust
+                                    for k in list(st.session_state.keys()):
+                                        if k.startswith("confirmar_dev_") or k.startswith("cond_"):
+                                            del st.session_state[k]
                                     if notif["ok"]:
-                                        st.success(
-                                            f"✅ Devolução registrada e mensagem enviada para "
-                                            f"{emp['colaborador'].split()[0]} no Slack!"
-                                        )
-                                        st.rerun()
+                                        st.toast(f"✅ Devolução registrada e mensagem enviada para {emp['colaborador'].split()[0]} no Slack!")
                                     else:
-                                        st.success(
-                                            f"✅ Devolução de {emp['equipamento']} "
-                                            f"({emp['cobli']}) registrada!"
-                                        )
-                                        # Mostra debug sem sumir com rerun imediato
-                                        st.warning("⚠️ Mensagem no Slack não foi enviada.")
-                                        st.json(notif)
-                                        st.button("Fechar e atualizar", on_click=st.rerun, key=f"close_{idx}")
+                                        st.toast(f"✅ Devolução de {emp['equipamento']} registrada! (Slack não notificado)")
+                                    bust_e_rerun()
                                 else:
                                     st.error("❌ Falha ao registrar. Tente novamente.")
 
-                            if col_cancel.button("✖ Cancelar", key=f"cancel_{idx}"):
+                            if cancelar:
                                 del st.session_state[f"confirmar_dev_{idx}"]
                                 st.rerun()
 
-                        st.markdown("---")
-
-                st.caption(f"{len(lista_filtrada)} registro(s) exibido(s).")
+                        st.markdown("<hr style='margin: 4px 0 12px; opacity:0.15'>", unsafe_allow_html=True)
 
     # ==========================================
     # ABA: LISTA GERAL
