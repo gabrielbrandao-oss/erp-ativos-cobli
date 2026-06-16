@@ -445,20 +445,84 @@ def main():
                 lista_filtrada.sort(key=sort_key)
 
                 # Cabeçalho da tabela
-                h1, h2, h3, h4 = st.columns([3, 2, 2, 2])
+                h1, h2, h3, h4, h5 = st.columns([3, 2, 2, 2, 2])
                 h1.markdown("**Colaborador**")
                 h2.markdown("**Equipamento**")
                 h3.markdown("**Cobli**")
                 h4.markdown("**Status / Retorno**")
+                h5.markdown("**Ação**")
                 st.markdown("---")
 
-                for emp in lista_filtrada:
+                for idx, emp in enumerate(lista_filtrada):
                     emoji, label = status_emprestimo(emp["prazo"])
-                    c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+                    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
                     c1.write(emp["colaborador"])
                     c2.write(emp["equipamento"])
                     c3.write(emp["cobli"] if emp["cobli"] else "—")
                     c4.write(f"{emoji} {label}")
+
+                    # Botão de devolução inline
+                    if c5.button("↩ Devolver", key=f"dev_{idx}", type="secondary"):
+                        st.session_state[f"confirmar_dev_{idx}"] = True
+
+                    # Painel de confirmação + condição logo abaixo da linha
+                    if st.session_state.get(f"confirmar_dev_{idx}"):
+                        with st.container():
+                            st.markdown(
+                                f"> Confirmar devolução de **{emp['equipamento']}** "
+                                f"({emp['cobli']}) de **{emp['colaborador']}**?"
+                            )
+                            col_cond, col_ok, col_cancel = st.columns([2, 1, 1])
+                            cond_dev = col_cond.selectbox(
+                                "Condição:", ["Perfeito", "Defeito", "Avariado"],
+                                key=f"cond_{idx}"
+                            )
+                            if col_ok.button("✅ Confirmar", key=f"ok_{idx}", type="primary"):
+                                user = next(
+                                    (c for c in dados_slack if c.get("nome") == emp["colaborador"]),
+                                    None
+                                ) if dados_slack else None
+                                slack_id = user.get("id", "") if user else ""
+                                data_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+                                payload_dev = {
+                                    "action": "app-post",
+                                    "colaborador": emp["colaborador"],
+                                    "slack_id": slack_id,
+                                    "equipamento": emp["equipamento"],
+                                    "acao": "Devolvido",
+                                    "cobli_antigo": emp["cobli"],
+                                    "cobli_novo": "",
+                                    "prazo": "Definitivo",
+                                    "condicao": cond_dev,
+                                    "observacao": "Devolução registrada via aba Empréstimos",
+                                    "data": data_str,
+                                }
+                                with st.spinner("Registrando devolução..."):
+                                    ok = enviar_movimentacao(payload_dev)
+
+                                if ok:
+                                    # Notifica o colaborador no Slack
+                                    if slack_id:
+                                        notificar_devolucao_slack(
+                                            slack_id, emp["colaborador"],
+                                            emp["equipamento"], emp["cobli"]
+                                        )
+                                    st.success(
+                                        f"✅ Devolução de {emp['equipamento']} "
+                                        f"({emp['cobli']}) registrada!"
+                                    )
+                                    del st.session_state[f"confirmar_dev_{idx}"]
+                                    buscar_planilhas.clear()
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Falha ao registrar. Tente novamente.")
+
+                            if col_cancel.button("✖ Cancelar", key=f"cancel_{idx}"):
+                                del st.session_state[f"confirmar_dev_{idx}"]
+                                st.rerun()
+
+                        st.markdown("---")
 
                 st.caption(f"{len(lista_filtrada)} registro(s) exibido(s).")
 
