@@ -51,14 +51,16 @@ def enviar_movimentacao(payload: Dict[str, Any]) -> bool:
     except requests.exceptions.RequestException:
         return False
 
-def notificar_devolucao_slack(slack_id: str, nome_colab: str, equipamento: str, cobli: str) -> bool:
+def notificar_devolucao_slack(slack_id: str, nome_colab: str, equipamento: str, cobli: str) -> Dict[str, Any]:
     """
     Envia DM no Slack agradecendo a devolução do equipamento.
-    Passa pelo mesmo webhook do n8n com action='slack-dm', que deve
-    estar configurado para chamar o método chat.postMessage da Slack API.
+    Retorna dict com status e detalhes para debug.
     """
+    resultado = {"ok": False, "motivo": "", "slack_id": slack_id, "http_status": None, "resposta": ""}
+
     if not slack_id:
-        return False
+        resultado["motivo"] = "slack_id vazio — colaborador não encontrado no diretório do Slack"
+        return resultado
 
     primeiro_nome = nome_colab.split()[0] if nome_colab else "pessoal"
     cobli_label   = f" ({cobli})" if cobli else ""
@@ -77,10 +79,14 @@ def notificar_devolucao_slack(slack_id: str, nome_colab: str, equipamento: str, 
 
     try:
         res = session.post(WEBHOOK_URL, json=payload, timeout=10)
+        resultado["http_status"] = res.status_code
+        resultado["resposta"] = res.text[:300]
         res.raise_for_status()
-        return True
-    except requests.exceptions.RequestException:
-        return False
+        resultado["ok"] = True
+    except requests.exceptions.RequestException as e:
+        resultado["motivo"] = str(e)
+
+    return resultado
 
 # ==========================================
 # CAMADA DE VALIDAÇÃO
@@ -375,14 +381,15 @@ def main():
                             st.success(f"✅ {fluxo} registrado com sucesso!")
 
                             # Notificação Slack para devoluções
-                            if fluxo == "Devolvido" and slack_id:
-                                notif_ok = notificar_devolucao_slack(
+                            if fluxo == "Devolvido":
+                                notif = notificar_devolucao_slack(
                                     slack_id, colab_sel, eqp_sel, c_ant_s
                                 )
-                                if notif_ok:
+                                if notif["ok"]:
                                     st.info(f"💬 Mensagem enviada para {colab_sel} no Slack.")
                                 else:
-                                    st.warning("⚠️ Devolução registrada, mas não foi possível enviar a mensagem no Slack.")
+                                    with st.expander("⚠️ Devolução registrada, mas a mensagem no Slack não foi enviada. Ver detalhes"):
+                                        st.json(notif)
 
                             buscar_planilhas.clear()
                             st.rerun()
@@ -502,16 +509,22 @@ def main():
                                     ok = enviar_movimentacao(payload_dev)
 
                                 if ok:
-                                    # Notifica o colaborador no Slack
-                                    if slack_id:
-                                        notificar_devolucao_slack(
-                                            slack_id, emp["colaborador"],
-                                            emp["equipamento"], emp["cobli"]
-                                        )
-                                    st.success(
-                                        f"✅ Devolução de {emp['equipamento']} "
-                                        f"({emp['cobli']}) registrada!"
+                                    notif = notificar_devolucao_slack(
+                                        slack_id, emp["colaborador"],
+                                        emp["equipamento"], emp["cobli"]
                                     )
+                                    if notif["ok"]:
+                                        st.success(
+                                            f"✅ Devolução registrada e mensagem enviada para "
+                                            f"{emp['colaborador'].split()[0]} no Slack!"
+                                        )
+                                    else:
+                                        st.success(
+                                            f"✅ Devolução de {emp['equipamento']} "
+                                            f"({emp['cobli']}) registrada!"
+                                        )
+                                        with st.expander("⚠️ Mensagem no Slack não enviada. Ver detalhes"):
+                                            st.json(notif)
                                     del st.session_state[f"confirmar_dev_{idx}"]
                                     buscar_planilhas.clear()
                                     st.rerun()
