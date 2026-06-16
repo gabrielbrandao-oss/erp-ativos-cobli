@@ -90,21 +90,43 @@ def sanitizar_input(texto: str) -> str:
         return ""
     return re.sub(r'[<>{}\[\]]', '', str(texto)).strip()
 
-def status_emprestimo(prazo_str: str) -> tuple[str, str]:
+def normalizar_prazo(prazo) -> Optional[datetime]:
+    """Converte prazo para datetime independente do formato recebido (string ou objeto)."""
+    if prazo is None:
+        return None
+    # Já é um objeto datetime
+    if isinstance(prazo, datetime):
+        return prazo
+    prazo_str = str(prazo).strip()
+    if prazo_str in ("", "Definitivo", "None"):
+        return None
+    # Tenta DD/MM/YYYY (formato do app)
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(prazo_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+def eh_emprestimo(linha: Dict[str, Any]) -> bool:
+    """Um registro é empréstimo quando Prazo é uma data real (não 'Definitivo' nem vazio)."""
+    prazo_raw = linha.get("Prazo") or linha.get("prazo")
+    return normalizar_prazo(prazo_raw) is not None
+
+def status_emprestimo(prazo) -> tuple[str, str]:
     """Retorna (emoji_status, label) com base na data de retorno."""
-    try:
-        prazo_dt = datetime.strptime(prazo_str, "%d/%m/%Y")
-        dias_restantes = (prazo_dt - datetime.now()).days
-        if dias_restantes < 0:
-            return "🔴", f"Atrasado {abs(dias_restantes)}d"
-        elif dias_restantes == 0:
-            return "🟡", "Vence hoje"
-        elif dias_restantes <= 3:
-            return "🟡", f"Vence em {dias_restantes}d"
-        else:
-            return "🟢", f"Em dia ({prazo_dt.strftime('%d/%m')})"
-    except (ValueError, TypeError):
+    prazo_dt = normalizar_prazo(prazo)
+    if prazo_dt is None:
         return "⚪", "Sem prazo definido"
+    dias_restantes = (prazo_dt - datetime.now()).days
+    if dias_restantes < 0:
+        return "🔴", f"Atrasado {abs(dias_restantes)}d"
+    elif dias_restantes == 0:
+        return "🟡", "Vence hoje"
+    elif dias_restantes <= 3:
+        return "🟡", f"Vence em {dias_restantes}d"
+    else:
+        return "🟢", f"Em dia ({prazo_dt.strftime('%d/%m')})"
 
 def build_payload_base(fluxo: str, colab_sel: str, slack_id: str, eqp_sel: str,
                         c_ant: str, c_nov: str, prazo_str: str, cond: str,
@@ -186,12 +208,13 @@ def main():
         if colab.upper() == (nomes[0] if nomes else "").upper():
             pass  # será preenchido abaixo após selectbox
 
-        if acao.lower() == "emprestimo" and prazo not in ("", "Definitivo"):
+        prazo_raw = linha.get("Prazo") or linha.get("prazo")
+        if eh_emprestimo(linha):
             emprestimos_ativos.append({
                 "colaborador": colab,
                 "equipamento": eqp,
                 "cobli": cobli,
-                "prazo": prazo,
+                "prazo": prazo_raw,  # guarda o valor original para normalizar_prazo depois
             })
 
     for linha in storage:
@@ -455,19 +478,14 @@ def main():
             colab = str(linha.get("Colaborador", "")).strip()
             eqp   = str(linha.get("Equipamento", "")).strip()
             cobli = str(linha.get("Cobli") or linha.get("Cobli_Novo") or "").strip()
-            acao  = str(linha.get("Acao", "")).strip()
-
             if not colab or "DEVOLVIDO" in colab.upper() or "EXTRAVIADO" in colab.upper() or not eqp:
                 continue
 
             if filtro_eqp != "Todos" and eqp.upper() != filtro_eqp.upper():
                 continue
 
-            # Badge de status
-            if acao.lower() == "emprestimo":
-                badge = "🔄 Emprestado"
-            else:
-                badge = ""
+            # Badge de status: empréstimo = prazo é uma data real
+            badge = "🔄 Emprestado" if eh_emprestimo(linha) else ""
 
             label = f"**{eqp}** ({cobli})" + (f" — _{badge}_" if badge else "")
             pessoas_eqp.setdefault(colab, []).append(label)
