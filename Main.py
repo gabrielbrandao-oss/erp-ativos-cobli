@@ -485,12 +485,20 @@ def main():
                                 key=f"cond_{idx}"
                             )
                             if col_ok.button("✅ Confirmar", key=f"ok_{idx}", type="primary"):
-                                user = next(
-                                    (c for c in dados_slack if c.get("nome") == emp["colaborador"]),
-                                    None
-                                ) if dados_slack else None
+                                # Match flexível: exato → case-insensitive → primeiro nome
+                                user = None
+                                if dados_slack:
+                                    nome_busca = emp["colaborador"].strip().lower()
+                                    # 1. exato
+                                    user = next((c for c in dados_slack if str(c.get("nome","")).strip().lower() == nome_busca), None)
+                                    # 2. primeiro nome
+                                    if not user:
+                                        primeiro = nome_busca.split()[0]
+                                        user = next((c for c in dados_slack if str(c.get("nome","")).strip().lower().startswith(primeiro)), None)
                                 slack_id = user.get("id", "") if user else ""
                                 data_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+                                # Debug: mostra o que foi encontrado (remover após confirmar)
+                                st.caption(f"🔍 Debug Slack — buscando: '{emp['colaborador']}' | encontrado: {user.get('nome') if user else 'NENHUM'} | slack_id: '{slack_id}' | total no diretório: {len(dados_slack) if dados_slack else 0}")
 
                                 payload_dev = {
                                     "action": "app-post",
@@ -513,21 +521,24 @@ def main():
                                         slack_id, emp["colaborador"],
                                         emp["equipamento"], emp["cobli"]
                                     )
+                                    del st.session_state[f"confirmar_dev_{idx}"]
+                                    buscar_planilhas.clear()
+
                                     if notif["ok"]:
                                         st.success(
                                             f"✅ Devolução registrada e mensagem enviada para "
                                             f"{emp['colaborador'].split()[0]} no Slack!"
                                         )
+                                        st.rerun()
                                     else:
                                         st.success(
                                             f"✅ Devolução de {emp['equipamento']} "
                                             f"({emp['cobli']}) registrada!"
                                         )
-                                        with st.expander("⚠️ Mensagem no Slack não enviada. Ver detalhes"):
-                                            st.json(notif)
-                                    del st.session_state[f"confirmar_dev_{idx}"]
-                                    buscar_planilhas.clear()
-                                    st.rerun()
+                                        # Mostra debug sem sumir com rerun imediato
+                                        st.warning("⚠️ Mensagem no Slack não foi enviada.")
+                                        st.json(notif)
+                                        st.button("Fechar e atualizar", on_click=st.rerun, key=f"close_{idx}")
                                 else:
                                     st.error("❌ Falha ao registrar. Tente novamente.")
 
