@@ -228,8 +228,15 @@ def main():
                 "colaborador": colab,
                 "equipamento": eqp,
                 "cobli": cobli,
-                "prazo": prazo_raw,  # guarda o valor original para normalizar_prazo depois
+                "prazo": prazo_raw,
             })
+
+    # Remove localmente itens já devolvidos nesta sessão (n8n pode demorar para gravar)
+    devolvidos_sessao = st.session_state.get("devolvidos_sessao", set())
+    emprestimos_ativos = [
+        e for e in emprestimos_ativos
+        if e["cobli"] not in devolvidos_sessao
+    ]
 
     for linha in storage:
         eqp  = str(linha.get("Equipamento", "")).strip()
@@ -535,14 +542,18 @@ def main():
                                         slack_id, emp["colaborador"],
                                         emp["equipamento"], emp["cobli"]
                                     )
-                                    # Limpa estado e força rerun com bust
+                                    # Marca como devolvido localmente para sumir imediatamente
+                                    devolvidos = st.session_state.get("devolvidos_sessao", set())
+                                    devolvidos.add(emp["cobli"])
+                                    st.session_state["devolvidos_sessao"] = devolvidos
+                                    # Limpa estado e força rerun
                                     for k in list(st.session_state.keys()):
                                         if k.startswith("confirmar_dev_") or k.startswith("cond_"):
                                             del st.session_state[k]
                                     if notif["ok"]:
                                         st.toast(f"✅ Devolução registrada e mensagem enviada para {emp['colaborador'].split()[0]} no Slack!")
                                     else:
-                                        st.toast(f"✅ Devolução de {emp['equipamento']} registrada! (Slack não notificado)")
+                                        st.toast(f"✅ Devolução de {emp['equipamento']} ({emp['cobli']}) registrada!")
                                     bust_e_rerun()
                                 else:
                                     st.error("❌ Falha ao registrar. Tente novamente.")
