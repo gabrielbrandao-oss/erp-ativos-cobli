@@ -16,13 +16,12 @@ WEBHOOK_URL = st.secrets.get("N8N_WEBHOOK_URL", "https://n8n.efop.cobli.co/webho
 API_KEY = st.secrets.get("API_KEY", "")
 
 if not API_KEY:
-    st.error("🔒 API_KEY não configurada nas secrets do app. Encerrando por segurança.")
-    st.stop()
+    st.warning("⚠️ API_KEY não configurada — chamadas ao webhook seguirão sem autenticação.")
 
 session = requests.Session()
 retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
 session.mount('https://', HTTPAdapter(max_retries=retries))
-session.headers.update({"Authorization": f"Bearer {API_KEY}"})
+session.headers.update({"Authorization": f"Bearer {API_KEY}"} if API_KEY else {})
 
 # ==========================================
 # CAMADA DE INTEGRAÇÃO (API)
