@@ -236,13 +236,18 @@ def main():
     storage  = buscar_planilhas("buscar-storage",  _bust=bust)
     dados_slack = buscar_slack()
 
-    if dados_slack:
-        nomes = sorted([c.get("nome", "Desconhecido") for c in dados_slack])
-    else:
-        nomes_extraidos = {str(linha.get("Colaborador", "")).strip() for linha in vigentes if linha.get("Colaborador")}
-        nomes = sorted([n for n in nomes_extraidos if "DEVOLVIDO" not in n.upper()])
-        if not nomes:
-            nomes = ["(Aguardando desbloqueio do Slack...)"]
+    # Une nomes do Slack com nomes da planilha de ativos: garante que colaboradores
+    # desativados/removidos do Slack (mas que ainda têm equipamento vigente) continuem
+    # aparecendo na lista de seleção.
+    nomes_slack = {str(c.get("nome", "")).strip() for c in dados_slack if c.get("nome")}
+    nomes_vigentes = {
+        str(linha.get("Colaborador", "")).strip()
+        for linha in vigentes
+        if linha.get("Colaborador") and "DEVOLVIDO" not in str(linha.get("Colaborador")).upper()
+    }
+    nomes = sorted(nomes_slack | nomes_vigentes)
+    if not nomes:
+        nomes = ["(Aguardando desbloqueio do Slack...)"]
 
     # --- PROCESSAMENTO DE ESTOQUE E EMPRÉSTIMOS ---
     ativos_colab = []
