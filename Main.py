@@ -15,10 +15,14 @@ st.set_page_config(page_title="Periféricos Cobli", layout="wide")
 WEBHOOK_URL = st.secrets.get("N8N_WEBHOOK_URL", "https://n8n.efop.cobli.co/webhook/gestao-ativos")
 API_KEY = st.secrets.get("API_KEY", "")
 
+if not API_KEY:
+    st.error("🔒 API_KEY não configurada nas secrets do app. Encerrando por segurança.")
+    st.stop()
+
 session = requests.Session()
 retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
 session.mount('https://', HTTPAdapter(max_retries=retries))
-session.headers.update({"Authorization": f"Bearer {API_KEY}"} if API_KEY else {})
+session.headers.update({"Authorization": f"Bearer {API_KEY}"})
 
 # ==========================================
 # CAMADA DE INTEGRAÇÃO (API)
@@ -28,7 +32,11 @@ def buscar_slack() -> List[Dict[str, Any]]:
     try:
         res = session.get(WEBHOOK_URL, params={"action": "buscar-colab"}, timeout=10)
         res.raise_for_status()
-        return res.json().get("dados", [])
+        try:
+            return res.json().get("dados", [])
+        except ValueError:
+            st.error("Resposta inválida (não-JSON) do serviço de diretório (Slack).")
+            return []
     except requests.exceptions.RequestException:
         st.error("Falha na comunicação com o serviço de diretório (Slack).")
         return []
@@ -39,7 +47,11 @@ def buscar_planilhas(acao: str, _bust: int = 0) -> List[Dict[str, Any]]:
     try:
         res = session.get(WEBHOOK_URL, params={"action": acao}, timeout=10)
         res.raise_for_status()
-        return res.json().get("dados", [])
+        try:
+            return res.json().get("dados", [])
+        except ValueError:
+            st.error(f"Resposta inválida (não-JSON) da base de ativos: {acao}.")
+            return []
     except requests.exceptions.RequestException:
         st.error(f"Falha ao buscar dados da base de ativos: {acao}.")
         return []
@@ -126,6 +138,40 @@ def eh_emprestimo(linha: Dict[str, Any]) -> bool:
     prazo_raw = linha.get("Prazo") or linha.get("prazo")
     return normalizar_prazo(prazo_raw) is not None
 
+def linha_valida(linha: Dict[str, Any]) -> bool:
+    """Uma linha é válida (ativo em uso) quando tem colaborador e equipamento,
+    e o colaborador não está marcado como DEVOLVIDO/EXTRAVIADO."""
+    colab = str(linha.get("Colaborador", "")).strip()
+    eqp = str(linha.get("Equipamento", "")).strip()
+    return bool(colab) and bool(eqp) and "DEVOLVIDO" not in colab.upper() and "EXTRAVIADO" not in colab.upper()
+
+def filtrar_linhas_validas(vigentes: List[Dict[str, Any]], colab_filtro: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Extrai {colaborador, eqp, cobli, linha} das linhas válidas, opcionalmente
+    filtradas por colaborador (case-insensitive). Centraliza a lógica que antes
+    estava duplicada em 3 pontos do app."""
+    resultado = []
+    for linha in vigentes:
+        if not linha_valida(linha):
+            continue
+        colab = str(linha.get("Colaborador", "")).strip()
+        if colab_filtro and colab.upper() != colab_filtro.upper():
+            continue
+        eqp = str(linha.get("Equipamento", "")).strip()
+        cobli = str(linha.get("Cobli") or linha.get("Cobli_Novo") or "").strip()
+        resultado.append({"colaborador": colab, "eqp": eqp, "cobli": cobli, "linha": linha})
+    return resultado
+
+def buscar_slack_id(dados_slack: Optional[List[Dict[str, Any]]], nome: str) -> str:
+    """Busca slack_id por nome (case-insensitive), com fallback por primeiro nome."""
+    if not dados_slack or not nome:
+        return ""
+    nome_busca = nome.strip().lower()
+    user = next((c for c in dados_slack if str(c.get("nome", "")).strip().lower() == nome_busca), None)
+    if not user:
+        primeiro = nome_busca.split()[0] if nome_busca else ""
+        user = next((c for c in dados_slack if str(c.get("nome", "")).strip().lower().startswith(primeiro)), None)
+    return user.get("id", "") if user else ""
+
 def status_emprestimo(prazo) -> tuple[str, str]:
     """Retorna (emoji_status, label) com base na data de retorno."""
     prazo_dt = normalizar_prazo(prazo)
@@ -207,27 +253,16 @@ def main():
     danificados = 0
     emprestimos_ativos = []
 
-    for linha in vigentes:
-        colab = str(linha.get("Colaborador", "")).strip()
-        eqp   = str(linha.get("Equipamento", "")).strip()
-        cobli = str(linha.get("Cobli") or linha.get("Cobli_Novo") or "").strip()
-        acao  = str(linha.get("Acao", "")).strip()
-        prazo = str(linha.get("Prazo", "")).strip()
-
-        if not colab or "DEVOLVIDO" in colab.upper() or "EXTRAVIADO" in colab.upper() or not eqp:
-            continue
-
+    for item in filtrar_linhas_validas(vigentes):
+        eqp = item["eqp"]
         em_uso[eqp] = em_uso.get(eqp, 0) + 1
 
-        if colab.upper() == (nomes[0] if nomes else "").upper():
-            pass  # será preenchido abaixo após selectbox
-
-        prazo_raw = linha.get("Prazo") or linha.get("prazo")
-        if eh_emprestimo(linha):
+        if eh_emprestimo(item["linha"]):
+            prazo_raw = item["linha"].get("Prazo") or item["linha"].get("prazo")
             emprestimos_ativos.append({
-                "colaborador": colab,
+                "colaborador": item["colaborador"],
                 "equipamento": eqp,
-                "cobli": cobli,
+                "cobli": item["cobli"],
                 "prazo": prazo_raw,
             })
 
@@ -260,13 +295,10 @@ def main():
         colab_sel = st.selectbox("Colaborador atual:", nomes)
 
         # Ativos do colaborador selecionado
-        for linha in vigentes:
-            colab = str(linha.get("Colaborador", "")).strip()
-            eqp   = str(linha.get("Equipamento", "")).strip()
-            cobli = str(linha.get("Cobli") or linha.get("Cobli_Novo") or "").strip()
-            if colab and "DEVOLVIDO" not in colab.upper() and "EXTRAVIADO" not in colab.upper() and eqp:
-                if colab.upper() == colab_sel.upper():
-                    ativos_colab.append({"eqp": eqp, "cobli": cobli})
+        ativos_colab = [
+            {"eqp": item["eqp"], "cobli": item["cobli"]}
+            for item in filtrar_linhas_validas(vigentes, colab_filtro=colab_sel)
+        ]
 
         st.markdown("---")
         st.markdown("### 📊 Resumo")
@@ -340,6 +372,13 @@ def main():
                 cond  = st.selectbox("Motivo:", ["Roubo", "Perda", "Dano Total"])
 
             obs    = st.text_area("Observações:")
+
+            confirmacao_extra = True
+            if fluxo in ["Devolvido", "Troca", "Extravio"]:
+                confirmacao_extra = st.checkbox(
+                    f"Confirmo que desejo registrar **{fluxo}** para **{colab_sel}**."
+                )
+
             submit = st.form_submit_button("🚀 REGISTRAR MOVIMENTAÇÃO", type="primary")
 
             if submit:
@@ -348,6 +387,13 @@ def main():
                     erros.append("Nº Cobli Novo é obrigatório.")
                 if fluxo == "Troca" and not c_nov.strip():
                     erros.append("Cobli Novo é obrigatório na Troca.")
+                if fluxo in ["Troca", "Devolvido", "Extravio"] and not c_ant.strip():
+                    erros.append(
+                        "Não foi possível identificar o Cobli do item — verifique se o "
+                        "colaborador possui esse equipamento ativo."
+                    )
+                if fluxo in ["Devolvido", "Troca", "Extravio"] and not confirmacao_extra:
+                    erros.append("Marque a confirmação para prosseguir com esta ação.")
 
                 if erros:
                     for e in erros:
@@ -365,8 +411,7 @@ def main():
                             if st.form_submit_button("✅ Confirmar Offboarding", type="primary"):
                                 c_ant_s   = sanitizar_input(c_ant)
                                 obs_s     = sanitizar_input(obs)
-                                user      = next((c for c in dados_slack if c.get("nome") == colab_sel), None) if dados_slack else None
-                                slack_id  = user.get("id", "") if user else ""
+                                slack_id  = buscar_slack_id(dados_slack, colab_sel)
                                 data_str  = datetime.now().strftime("%d/%m/%Y %H:%M")
                                 with st.spinner("Registrando Offboarding..."):
                                     sucesso = processar_offboarding(eqps_finais, colab_sel, slack_id, cond, obs_s, data_str)
@@ -380,8 +425,7 @@ def main():
                         c_ant_s  = sanitizar_input(c_ant)
                         c_nov_s  = sanitizar_input(c_nov)
                         obs_s    = sanitizar_input(obs)
-                        user     = next((c for c in dados_slack if c.get("nome") == colab_sel), None) if dados_slack else None
-                        slack_id = user.get("id", "") if user else ""
+                        slack_id = buscar_slack_id(dados_slack, colab_sel)
                         data_str = datetime.now().strftime("%d/%m/%Y %H:%M")
 
                         payload = build_payload_base(
@@ -511,14 +555,7 @@ def main():
                             cancelar  = col_cancel.button("✖ Cancelar", key=f"cancel_{idx}", use_container_width=True)
 
                             if confirmar:
-                                user = None
-                                if dados_slack:
-                                    nome_busca = emp["colaborador"].strip().lower()
-                                    user = next((c for c in dados_slack if str(c.get("nome","")).strip().lower() == nome_busca), None)
-                                    if not user:
-                                        primeiro = nome_busca.split()[0]
-                                        user = next((c for c in dados_slack if str(c.get("nome","")).strip().lower().startswith(primeiro)), None)
-                                slack_id = user.get("id", "") if user else ""
+                                slack_id = buscar_slack_id(dados_slack, emp["colaborador"])
                                 data_str = datetime.now().strftime("%d/%m/%Y %H:%M")
 
                                 payload_dev = {
@@ -576,21 +613,16 @@ def main():
         filtro_eqp = col_b2.selectbox("Filtrar por equipamento:", ["Todos"] + chaves_eqp)
 
         pessoas_eqp: Dict[str, List[str]] = {}
-        for linha in vigentes:
-            colab = str(linha.get("Colaborador", "")).strip()
-            eqp   = str(linha.get("Equipamento", "")).strip()
-            cobli = str(linha.get("Cobli") or linha.get("Cobli_Novo") or "").strip()
-            if not colab or "DEVOLVIDO" in colab.upper() or "EXTRAVIADO" in colab.upper() or not eqp:
-                continue
-
+        for item in filtrar_linhas_validas(vigentes):
+            eqp = item["eqp"]
             if filtro_eqp != "Todos" and eqp.upper() != filtro_eqp.upper():
                 continue
 
             # Badge de status: empréstimo = prazo é uma data real
-            badge = "🔄 Emprestado" if eh_emprestimo(linha) else ""
+            badge = "🔄 Emprestado" if eh_emprestimo(item["linha"]) else ""
 
-            label = f"**{eqp}** ({cobli})" + (f" — _{badge}_" if badge else "")
-            pessoas_eqp.setdefault(colab, []).append(label)
+            label = f"**{eqp}** ({item['cobli']})" + (f" — _{badge}_" if badge else "")
+            pessoas_eqp.setdefault(item["colaborador"], []).append(label)
 
         # Filtro de busca por nome
         if busca_nome:
