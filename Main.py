@@ -161,7 +161,9 @@ def filtrar_linhas_validas(vigentes: List[Dict[str, Any]], colab_filtro: Optiona
     return resultado
 
 def buscar_slack_id(dados_slack: Optional[List[Dict[str, Any]]], nome: str) -> str:
-    """Busca slack_id por nome (case-insensitive), com fallback por primeiro nome."""
+    """Busca slack_id por nome (case-insensitive), com fallback por primeiro nome.
+    Retorna vazio se o colaborador estiver desativado no Slack (campo "ativo": false) —
+    nesse caso ele ainda aparece no app, só não recebe DM (o envio falharia mesmo)."""
     if not dados_slack or not nome:
         return ""
     nome_busca = nome.strip().lower()
@@ -169,7 +171,9 @@ def buscar_slack_id(dados_slack: Optional[List[Dict[str, Any]]], nome: str) -> s
     if not user:
         primeiro = nome_busca.split()[0] if nome_busca else ""
         user = next((c for c in dados_slack if str(c.get("nome", "")).strip().lower().startswith(primeiro)), None)
-    return user.get("id", "") if user else ""
+    if not user or not user.get("ativo", True):
+        return ""
+    return user.get("id", "")
 
 def status_emprestimo(prazo) -> tuple[str, str]:
     """Retorna (emoji_status, label) com base na data de retorno."""
